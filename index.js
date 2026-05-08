@@ -1,5 +1,6 @@
 // index.js
 require('dotenv').config();
+const http = require('http');
 const { Bot } = require('grammy');
 const { handleChartCommand } = require('./commands/chart');
 
@@ -65,4 +66,14 @@ bot.start({
     onStart: (botInfo) => {
         console.log(`✅ Bot successfully started! Running as @${botInfo.username}`);
     }
+});
+
+// --- Dummy HTTP Server for Render Web Service Free Tier ---
+// Render requires web services to bind to a port, otherwise the deploy fails.
+const PORT = process.env.PORT || 3000;
+http.createServer((req, res) => {
+    res.writeHead(200, { 'Content-Type': 'text/plain' });
+    res.end('Bot is running!\n');
+}).listen(PORT, () => {
+    console.log(`🌐 Dummy HTTP server listening on port ${PORT} for Render health checks.`);
 });
