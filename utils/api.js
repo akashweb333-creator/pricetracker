@@ -4,7 +4,6 @@ const axios = require('axios');
 const cache = new Map();
 const CACHE_TTL = 10000; // 10 seconds cache
 
-// Retry wrapper for robust API fetching
 async function fetchWithRetry(url, retries = 3, delayMs = 1000) {
     for (let i = 0; i < retries; i++) {
         try {
@@ -30,15 +29,69 @@ async function getCryptoData(query) {
     }
 
     try {
-        // 2. Try DexScreener First
+        // 1. Try CoinGecko First (More accurate for prices and 24h change of major coins)
+        let cgSearch = null;
+        try {
+            cgSearch = await fetchWithRetry(`https://api.coingecko.com/api/v3/search?query=${query}`);
+        } catch (e) {
+            console.error("CoinGecko search error");
+        }
+
+        if (cgSearch && cgSearch.coins && cgSearch.coins.length > 0) {
+            // Find exact symbol match if possible, otherwise first result
+            const exactMatch = cgSearch.coins.find(c => c.symbol.toLowerCase() === query.toLowerCase());
+            const coin = exactMatch || cgSearch.coins[0];
+            
+            const coinId = coin.id;
+            const logo = coin.large;
+            const symbol = coin.symbol.toUpperCase();
+            
+            try {
+                const cgPriceData = await fetchWithRetry(`https://api.coingecko.com/api/v3/simple/price?ids=${coinId}&vs_currencies=usd&include_24hr_change=true`);
+                
+                if (cgPriceData && cgPriceData[coinId] && cgPriceData[coinId].usd) {
+                    const price = cgPriceData[coinId].usd;
+                    const priceChange24h = cgPriceData[coinId].usd_24h_change || 0;
+                    const priceChange24hUsd = price * (priceChange24h / 100);
+
+                    const result = {
+                        symbol: symbol,
+                        name: coin.name,
+                        price: price,
+                        priceChange24h: priceChange24h,
+                        priceChange24hUsd: priceChange24hUsd,
+                        logo: logo,
+                        source: 'CoinGecko'
+                    };
+                    
+                    // Validate we actually have a price, otherwise fallback
+                    if (price > 0) {
+                        cache.set(cacheKey, { timestamp: now, data: result });
+                        return result;
+                    }
+                }
+            } catch (e) {
+                console.error("CoinGecko price fetch error");
+            }
+        }
+
+        // 2. Fallback to DexScreener (Great for new memecoins missing from CoinGecko)
         const dexData = await fetchWithRetry(`https://api.dexscreener.com/latest/dex/search/?q=${query}`);
         if (dexData && dexData.pairs && dexData.pairs.length > 0) {
-            // Sort by USD liquidity to get the most relevant/real pair instead of a scam token
+            // Sort by liquidity to get real pair instead of scam tokens
             const bestPair = dexData.pairs.sort((a, b) => (b.liquidity?.usd || 0) - (a.liquidity?.usd || 0))[0];
             
             const price = parseFloat(bestPair.priceUsd || 0);
             const priceChange24h = parseFloat(bestPair.priceChange?.h24 || 0);
             const priceChange24hUsd = price * (priceChange24h / 100);
+
+            let logo = bestPair.info?.imageUrl || null;
+
+            // Try grabbing logo from our earlier CoinGecko search if dex logo is missing
+            if (!logo && cgSearch && cgSearch.coins && cgSearch.coins.length > 0) {
+                const coin = cgSearch.coins.find(c => c.symbol.toLowerCase() === bestPair.baseToken.symbol.toLowerCase()) || cgSearch.coins[0];
+                logo = coin.large;
+            }
 
             const result = {
                 symbol: bestPair.baseToken.symbol.toUpperCase(),
@@ -46,54 +99,12 @@ async function getCryptoData(query) {
                 price: price,
                 priceChange24h: priceChange24h,
                 priceChange24hUsd: priceChange24hUsd,
-                logo: bestPair.info?.imageUrl || null,
+                logo: logo,
                 source: 'DexScreener'
             };
-            
-            // If DexScreener doesn't provide a logo, attempt fallback to CoinGecko search for logo only
-            if (!result.logo) {
-                try {
-                    const cgSearch = await fetchWithRetry(`https://api.coingecko.com/api/v3/search?query=${query}`);
-                    if (cgSearch && cgSearch.coins && cgSearch.coins.length > 0) {
-                        const coin = cgSearch.coins.find(c => c.symbol.toLowerCase() === result.symbol.toLowerCase()) || cgSearch.coins[0];
-                        if (coin && coin.large) result.logo = coin.large;
-                    }
-                } catch (e) {
-                    console.error("CoinGecko search fallback failed for logo");
-                }
-            }
 
             cache.set(cacheKey, { timestamp: now, data: result });
             return result;
-        }
-
-        // 3. Fallback to CoinGecko if not found on DexScreener
-        const cgSearch = await fetchWithRetry(`https://api.coingecko.com/api/v3/search?query=${query}`);
-        if (cgSearch && cgSearch.coins && cgSearch.coins.length > 0) {
-            const coinId = cgSearch.coins[0].id;
-            const logo = cgSearch.coins[0].large;
-            const symbol = cgSearch.coins[0].symbol.toUpperCase();
-            
-            const cgPriceData = await fetchWithRetry(`https://api.coingecko.com/api/v3/simple/price?ids=${coinId}&vs_currencies=usd&include_24hr_change=true`);
-            
-            if (cgPriceData && cgPriceData[coinId]) {
-                const price = cgPriceData[coinId].usd;
-                const priceChange24h = cgPriceData[coinId].usd_24h_change || 0;
-                const priceChange24hUsd = price * (priceChange24h / 100);
-
-                const result = {
-                    symbol: symbol,
-                    name: cgSearch.coins[0].name,
-                    price: price,
-                    priceChange24h: priceChange24h,
-                    priceChange24hUsd: priceChange24hUsd,
-                    logo: logo,
-                    source: 'CoinGecko'
-                };
-                
-                cache.set(cacheKey, { timestamp: now, data: result });
-                return result;
-            }
         }
 
         return null;
